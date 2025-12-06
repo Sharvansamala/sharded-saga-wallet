@@ -1,0 +1,29 @@
+dataSources:
+  shardwallet1:
+    jdbcUrl: jdbc:postgresql://localhost:5432/shardwallet1
+    username: postgres
+    password: postgres
+    driverClassName: org.postgresql.Driver
+    dataSourceClassName: org.postgresql.ds.PGSimpleDataSource
+
+  shardwallet2:
+    jdbcUrl: jdbc:postgresql://localhost:5432/shardwallet2
+    username: postgres
+    password: postgres
+    driverClassName: org.postgresql.Driver
+    dataSourceClassName: org.postgresql.ds.PGSimpleDataSource
+
+rules:
+  - !SHARDING
+    tables:
+      users:
+        actualDataNodes: shardwallet${1..2}.users
+        databaseStrategy:
+          standard:
+            shardingColumn: email
+            shardingAlgorithmName: database-inline
+    shardingAlgorithms:
+      database-inline:
+        type: INLINE
+        props:
+          algorithm-expression: shardwallet${Math.abs(email.hashCode()) % 2 + 1}
