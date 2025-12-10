@@ -34,8 +34,8 @@ public class DebitSourceWalletStep implements SagaStep {
             throw new RuntimeException("Insufficient Balance");
 
         wallet.debit(amount);
-
         walletRepository.save(wallet);
+
         log.info("Wallet saved with balance: {}", wallet.getBalance());
         context.putData("fromWalletBalanceAfterDebit", wallet.getBalance());
 
@@ -48,16 +48,20 @@ public class DebitSourceWalletStep implements SagaStep {
     public boolean compensate(SagaContext context) {
         Long fromWalletId = context.getLong("fromWalletId");
         BigDecimal amount = context.getBigDecimal("amount");
-        log.info("Debit Source wallet id {}, with amount {}", fromWalletId, amount);
+
+        log.info("Compensating Source wallet id {}, with amount {}", fromWalletId, amount);
+
         Wallet wallet = walletRepository.findByIdWithLock(fromWalletId)
                 .orElseThrow(() -> new RuntimeException("Wallet not found"));
+
         log.info("Wallet fetched with balance: {}", wallet.getBalance());
-        context.putData("originalFromWalletBalance", wallet.getBalance());
+        context.putData("sourceWalletBalanceBeforeCompensation", wallet.getBalance());
 
         wallet.credit(amount);
         walletRepository.save(wallet);
+
         log.info("Wallet saved with balance: {}", wallet.getBalance());
-        context.putData("fromWalletBalanceAfterCredit", wallet.getBalance());
+        context.putData("sourceWalletBalanceAfterCreditCompensation", wallet.getBalance());
 
         log.info("Debit source wallet completed successfully");
 
