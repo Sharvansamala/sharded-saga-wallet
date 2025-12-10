@@ -29,7 +29,8 @@ public class UserService {
 
     public List<User> findByName(String name){
         String pattern = "%"+name+"%";
-        return userRepository.searchByName(pattern);
+//        return userRepository.searchByName(pattern);
+        return null;
     }
     
 }

@@ -13,9 +13,9 @@ import java.util.List;
 public interface UserRepository extends JpaRepository<User, Long> {
 //    List<User> findByNameContainingIgnoreCase(String name);
 
-    @Query(
-            value = "SELECT u.* FROM users u WHERE UPPER(u.name) LIKE UPPER(:pattern)",
-            nativeQuery = true
-    )
-    List<User> searchByName(@Param("pattern") String pattern);
+//    @Query(
+//            value = "SELECT u.* FROM users u WHERE UPPER(u.name) LIKE UPPER(:pattern)",
+//            nativeQuery = true
+//    )
+//    List<User> searchByName(@Param("pattern") String pattern);
 }
