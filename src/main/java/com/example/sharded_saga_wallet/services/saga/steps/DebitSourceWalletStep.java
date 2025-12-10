@@ -14,58 +14,58 @@ import java.math.BigDecimal;
 @Service
 @RequiredArgsConstructor
 @Slf4j
-public class CreditDestinationWalletStep implements SagaStep {
-
+public class DebitSourceWalletStep implements SagaStep {
     private final WalletRepository walletRepository;
 
     @Override
     @Transactional
     public boolean execute(SagaContext context) {
-
-        //Step 1: get wallet if from context
-        Long toWalletId = context.getLong("toWalletId");
+        Long fromWalletId = context.getLong("fromWalletId");
         BigDecimal amount = context.getBigDecimal("amount");
-        log.info("Crediting destination wallet {} with amount {}", toWalletId, amount);
+        log.info("Debit Source wallet id {}, with amount {}", fromWalletId, amount);
 
-        //step 2 : fetch dest wall with lock
-        Wallet wallet = walletRepository.findByIdWithLock(toWalletId).orElseThrow(() -> new RuntimeException("Wallet not found"));
+        Wallet wallet = walletRepository.findByIdWithLock(fromWalletId)
+                .orElseThrow(() -> new RuntimeException("Wallet not found"));
+
         log.info("Wallet fetched with balance: {}", wallet.getBalance());
-        context.putData("originalToWalletBalance", wallet.getBalance());
+        context.putData("originalFromWalletBalance", wallet.getBalance());
 
-        wallet.credit(amount);
+        if(!wallet.hasSufficientBalance(amount))
+            throw new RuntimeException("Insufficient Balance");
+
+        wallet.debit(amount);
 
         walletRepository.save(wallet);
         log.info("Wallet saved with balance: {}", wallet.getBalance());
-        context.putData("toWalletBalanceAfterCredit", wallet.getBalance());
+        context.putData("fromWalletBalanceAfterDebit", wallet.getBalance());
 
-        log.info("Credit Destination Wallet Step completed successfully");
+        log.info("Debit source wallet completed successfully");
+
         return true;
     }
 
     @Override
-    @Transactional
     public boolean compensate(SagaContext context) {
-        Long toWalletId = context.getLong("toWalletId");
+        Long fromWalletId = context.getLong("fromWalletId");
         BigDecimal amount = context.getBigDecimal("amount");
-        log.info("Compensation credit ofs destination wallet {} with amount {}", toWalletId, amount);
-
-
-        Wallet wallet = walletRepository.findByIdWithLock(toWalletId)
-                .orElseThrow(() -> new RuntimeException("Wallet Not found"));
-
+        log.info("Debit Source wallet id {}, with amount {}", fromWalletId, amount);
+        Wallet wallet = walletRepository.findByIdWithLock(fromWalletId)
+                .orElseThrow(() -> new RuntimeException("Wallet not found"));
         log.info("Wallet fetched with balance: {}", wallet.getBalance());
+        context.putData("originalFromWalletBalance", wallet.getBalance());
 
-        wallet.debit(amount);
+        wallet.credit(amount);
         walletRepository.save(wallet);
         log.info("Wallet saved with balance: {}", wallet.getBalance());
-        context.putData("toWalletBalanceAfterCreditCompensation", wallet.getBalance());
+        context.putData("fromWalletBalanceAfterCredit", wallet.getBalance());
 
-        log.info("Credit Compensation Wallet Step completed successfully");
+        log.info("Debit source wallet completed successfully");
+
         return true;
     }
 
     @Override
     public String getStepName() {
-        return "CreditDestinationWalletStep";
+        return "DebitSourceWalletStep";
     }
 }
