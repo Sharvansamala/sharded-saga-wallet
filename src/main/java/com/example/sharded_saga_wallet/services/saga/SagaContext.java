@@ -40,4 +40,11 @@ public class SagaContext {
             return (BigDecimal) value;
         return null;
     }
+
+    public String getString(String key){
+        Object value = getData(key);
+        if (value instanceof String)
+            return (String) value;
+        return null;
+    }
 }
