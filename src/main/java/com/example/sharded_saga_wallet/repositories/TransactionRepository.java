@@ -1,7 +1,7 @@
 package com.example.sharded_saga_wallet.repositories;
 
 import com.example.sharded_saga_wallet.entities.Transaction;
-import com.example.sharded_saga_wallet.entities.TransactionStatus;
+import com.example.sharded_saga_wallet.entities.enums.TransactionStatus;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;

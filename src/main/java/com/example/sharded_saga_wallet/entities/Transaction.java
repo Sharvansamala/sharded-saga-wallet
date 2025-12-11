@@ -1,5 +1,7 @@
 package com.example.sharded_saga_wallet.entities;
 
+import com.example.sharded_saga_wallet.entities.enums.TransactionStatus;
+import com.example.sharded_saga_wallet.entities.enums.TransactionType;
 import jakarta.persistence.*;
 import lombok.Data;
 

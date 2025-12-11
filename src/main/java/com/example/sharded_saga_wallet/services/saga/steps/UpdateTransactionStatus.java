@@ -1,7 +1,7 @@
 package com.example.sharded_saga_wallet.services.saga.steps;
 
 import com.example.sharded_saga_wallet.entities.Transaction;
-import com.example.sharded_saga_wallet.entities.TransactionStatus;
+import com.example.sharded_saga_wallet.entities.enums.TransactionStatus;
 import com.example.sharded_saga_wallet.repositories.TransactionRepository;
 import com.example.sharded_saga_wallet.services.saga.SagaContext;
 import com.example.sharded_saga_wallet.services.saga.SagaStep;

@@ -1,5 +1,6 @@
 package com.example.sharded_saga_wallet.entities;
 
+import com.example.sharded_saga_wallet.entities.enums.SagaStatus;
 import jakarta.persistence.*;
 
 @Entity
