@@ -32,7 +32,7 @@ public class CreditDestinationWalletStep implements SagaStep {
         log.info("Wallet fetched with balance: {}", wallet.getBalance());
         context.putData("originalToWalletBalance", wallet.getBalance());
 
-        wallet.credit(amount);
+//        wallet.credit(amount);
 
         walletRepository.save(wallet);
         log.info("Wallet saved with balance: {}", wallet.getBalance());
