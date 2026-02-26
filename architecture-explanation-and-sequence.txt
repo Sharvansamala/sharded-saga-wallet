@@ -1,0 +1,712 @@
+Sharded Saga Wallet - Architecture Explanation and Sequence Diagram
+==================================================================
+
+1. High-level Overview
+----------------------
+
+This Spring Boot 4 application models a wallet system using the Saga pattern to orchestrate distributed transactions (such as transferring money between wallets). It is structured in typical Spring layers:
+
+- Entry point: ShardedSagaWalletApplication
+- Web API: UserController
+- Business logic: UserService and saga step services
+- Saga orchestration: SagaOrchestrator, SagaContext, SagaStep (service interface) plus concrete step classes
+- Persistence: JPA entities (User, Wallet, Transaction, SagaInstance, entities.SagaStep) and repositories
+- Enums: TransactionStatus, TransactionType, SagaStatus, StepStatus
+
+The ShardingSphere dependency and some logging (modulo the user ID) hint at a sharded database setup.
+
+
+2. Application Entry Point
+--------------------------
+
+Class: com.example.sharded_saga_wallet.ShardedSagaWalletApplication
+
+- Purpose:
+  - Standard Spring Boot entry.
+  - Boots the application, performs component scanning, starts the embedded server, and wires Spring beans.
+
+- Key Behavior:
+  - main(String[] args) calls SpringApplication.run(ShardedSagaWalletApplication.class, args).
+
+- Flow:
+  - When you run the app (for example, ./gradlew bootRun), this class starts first and brings up the rest: controllers, services, repositories, etc.
+
+
+3. Web Layer
+------------
+
+Class: com.example.sharded_saga_wallet.controller.UserController
+
+- Purpose:
+  - Exposes HTTP endpoints under /users for user operations.
+
+- Dependencies:
+  - private final UserService userService; (constructor-injected via Lombok @RequiredArgsConstructor).
+
+- Endpoints and Flow:
+  - POST /users/create
+    - Method: createUser(@RequestBody User user)
+    - Flow:
+      1. Receives an HTTP POST with a JSON body representing a User.
+      2. Calls userService.createUser(user).
+      3. Returns the created User with HTTP 201 (CREATED).
+
+  - GET /users/{id}
+    - Method: getUserById(@PathVariable Long id)
+    - Flow:
+      1. Receives an HTTP GET with a user ID path variable.
+      2. Calls userService.getUserById(id).
+      3. Returns the User, or throws a RuntimeException("User not found") if missing.
+
+  - GET /users/name?name=...
+    - Method: findByName(@RequestParam String name)
+    - Intended Flow:
+      1. Receives an HTTP GET with query parameter name.
+      2. Calls userService.findByName(name).
+      3. Should return a list of matching users with HTTP 200.
+    - Current State:
+      - userService.findByName currently returns null and related repository methods are commented out, so this endpoint is not yet fully implemented.
+
+
+4. Service Layer
+----------------
+
+Class: com.example.sharded_saga_wallet.services.UserService
+
+- Purpose:
+  - Encapsulates business logic related to User operations.
+
+- Dependencies:
+  - private final UserRepository userRepository; (injected via Spring).
+
+- Methods and Flow:
+
+  - User createUser(User user)
+    - Logs the creation attempt: "Creating user: {user}".
+    - Persists the user with userRepository.save(user).
+    - Logs the final user ID and a calculated "database number": newUser.getId() % 2 + 1.
+      - This modulo operation hints at a sharding strategy where user IDs determine the shard.
+    - Returns the persisted User entity.
+
+  - User getUserById(Long id)
+    - Calls userRepository.findById(id).
+    - If not found, throws new RuntimeException("User not found").
+    - Used by UserController.getUserById to fetch users via HTTP.
+
+  - List<User> findByName(String name)
+    - Builds a SQL LIKE pattern: "%" + name + "%".
+    - Intended to delegate to a repository method (e.g., searchByName(pattern)), but this is commented out.
+    - Currently it returns null, so the corresponding endpoint in UserController is not functionally complete.
+
+
+5. Saga Orchestration Interfaces and Context
+-------------------------------------------
+
+5.1 SagaOrchestrator (interface)
+
+Package: com.example.sharded_saga_wallet.services.saga
+
+- Purpose:
+  - Defines the contract for starting, running, compensating, and completing sagas (multi-step, distributed transactions).
+
+- Methods (no implementation in the repo yet):
+  - Long startSaga(SagaContext context);
+    - Should create a SagaInstance record, initialize its status and context, and return the new saga ID.
+
+  - boolean executeStep(Long sagaInstanceId, String stepName);
+    - Should execute a named SagaStep (service) for the given saga instance.
+
+  - boolean compensateSaga(Long sagaInstanceId, String stepName);
+    - Should trigger compensation (rollback) logic for a specific step.
+
+  - void compensateSaga(Long sagaInstanceId);
+    - Should initiate compensation for the entire saga, likely by compensating steps in reverse order.
+
+  - void failSaga(Long sagaInstanceId);
+    - Should mark a saga as failed.
+
+  - void completeSaga(Long sagaInstanceId);
+    - Should mark a saga as successfully completed.
+
+- Intended Role:
+  - A concrete implementation would use SagaInstanceRepository and SagaStepRepository to persist saga lifecycle and step information, and use Spring’s DI to look up SagaStep beans by name.
+
+
+5.2 SagaContext
+
+Package: com.example.sharded_saga_wallet.services.saga
+
+- Purpose:
+  - A simple key-value store that carries data between saga steps.
+  - Wraps a Map<String, Object> with convenience methods for type-safe retrieval.
+
+- Structure:
+  - private Map<String, Object> data;
+  - Constructors initialize the map, defaulting to a new HashMap if null.
+
+- Key Methods:
+  - void putData(String key, Object value)
+  - Object getData(String key)
+  - Long getLong(String key)
+  - BigDecimal getBigDecimal(String key)
+  - String getString(String key)
+
+- Usage:
+  - Before starting a saga, upstream code will populate keys such as:
+    - "fromWalletId", "toWalletId", "amount", "transactionId", etc.
+  - Each SagaStep implementation reads from this context and can store intermediate results or snapshots for later steps or compensations.
+
+
+5.3 SagaStep (service-level interface)
+
+Package: com.example.sharded_saga_wallet.services.saga
+
+- Purpose:
+  - Defines a single, logical unit of work within a saga, along with its compensation (rollback) behavior.
+
+- Methods:
+  - boolean execute(SagaContext context);
+    - Performs the main side-effect or business logic for this step.
+
+  - boolean compensate(SagaContext context);
+    - Performs the undo/rollback logic for this step.
+
+  - String getStepName();
+    - Returns a step name, e.g., "DebitSourceWalletStep", used by the orchestrator to locate and invoke the correct bean.
+
+
+6. Saga Step Implementations (Wallet and Transaction Logic)
+-----------------------------------------------------------
+
+6.1 DebitSourceWalletStep
+
+Package: com.example.sharded_saga_wallet.services.saga.steps
+
+- Purpose:
+  - Debits the source wallet balance as part of a transfer.
+  - Defines compensation logic that credits the amount back if the saga fails.
+
+- Dependencies:
+  - private final WalletRepository walletRepository;
+
+- execute(SagaContext context) Flow:
+  1. Retrieves the source wallet ID and amount from the context:
+     - Long fromWalletId = context.getLong("fromWalletId");
+     - BigDecimal amount = context.getBigDecimal("amount");
+  2. Logs an informational message about the debit.
+  3. Uses walletRepository.findByIdWithLock(fromWalletId) to fetch the wallet with a pessimistic write lock.
+  4. Stores the original balance in the context under "originalFromWalletBalance".
+  5. Checks hasSufficientBalance(amount) on the wallet.
+     - If false, throws RuntimeException("Insufficient Balance"), causing the saga to fail at this step.
+  6. Calls wallet.debit(amount) and then walletRepository.save(wallet).
+  7. Stores "fromWalletBalanceAfterDebit" in the context with the updated balance.
+  8. Logs success and returns true.
+
+- compensate(SagaContext context) Flow:
+  1. Reads fromWalletId and amount from the context.
+  2. Logs that it is compensating (undoing) the debit.
+  3. Loads the wallet with a lock using walletRepository.findByIdWithLock(fromWalletId).
+  4. Stores "sourceWalletBalanceBeforeCompensation" in the context.
+  5. Calls wallet.credit(amount) to restore the debited amount.
+  6. Saves the wallet and writes "sourceWalletBalanceAfterCreditCompensation" to the context.
+  7. Logs success and returns true.
+
+- getStepName():
+  - Returns "DebitSourceWalletStep".
+
+Note: Due to BigDecimal immutability, wallet.debit and wallet.credit must assign back to the balance field to truly modify it (the current implementation conceptually intends this but misses the assignment).
+
+
+6.2 CreditDestinationWalletStep
+
+Package: com.example.sharded_saga_wallet.services.saga.steps
+
+- Purpose:
+  - Credits the destination wallet in a transfer.
+  - Defines compensation that removes (debits) the credited amount if the saga fails later.
+
+- Dependencies:
+  - private final WalletRepository walletRepository;
+
+- execute(SagaContext context) Flow:
+  1. Reads toWalletId and amount from the context:
+     - Long toWalletId = context.getLong("toWalletId");
+     - BigDecimal amount = context.getBigDecimal("amount");
+  2. Logs that it is crediting the destination wallet.
+  3. Fetches the destination wallet with walletRepository.findByIdWithLock(toWalletId).
+  4. Stores the original balance as "originalToWalletBalance" in the context.
+  5. Intended to call wallet.credit(amount) but this line is currently commented out, so no balance change occurs in the present code.
+  6. Saves the wallet and stores "toWalletBalanceAfterCredit" in the context.
+  7. Logs success and returns true.
+
+- compensate(SagaContext context) Flow:
+  1. Reads toWalletId and amount from the context.
+  2. Logs that it is running compensation.
+  3. Loads the wallet with walletRepository.findByIdWithLock(toWalletId).
+  4. Debits the amount (wallet.debit(amount)) to undo the credit.
+  5. Saves the wallet and stores "toWalletBalanceAfterCreditCompensation" in the context.
+  6. Logs completion and returns true.
+
+- getStepName():
+  - Returns "CreditDestinationWalletStep".
+
+
+6.3 UpdateTransactionStatus
+
+Package: com.example.sharded_saga_wallet.services.saga.steps
+
+- Purpose:
+  - Updates the status of a Transaction entity, typically to SUCCESS when the saga completes.
+  - Provides a compensation mechanism to revert the status to its original value if necessary.
+
+- Dependencies:
+  - private final TransactionRepository transactionRepository;
+
+- execute(SagaContext context) Flow:
+  1. Reads Long transactionId = context.getLong("transactionId").
+  2. Logs that it is updating the transaction status.
+  3. Loads the Transaction from the database via transactionRepository.findById(transactionId).
+  4. Stores the original status in the context under "originalTransactionStatus".
+  5. Sets transaction.setStatus(TransactionStatus.SUCCESS).
+  6. Saves the transaction and adds "updatedTransactionStatus" to the context.
+  7. Logs success and returns true.
+
+- compensate(SagaContext context) Flow:
+  1. Reads transactionId and originalTransactionStatus (as a String) from the context.
+  2. Converts the original status string back to a TransactionStatus using TransactionStatus.valueOf.
+  3. Reloads the Transaction from the database.
+  4. Sets the transaction status back to the original.
+  5. Saves the transaction and stores "compensatedTransactionStatus" in the context.
+  6. Logs completion and returns true.
+
+- getStepName():
+  - Returns "UpdateTransactionStatus".
+
+
+7. Domain Entities
+------------------
+
+7.1 User
+
+Package: com.example.sharded_saga_wallet.entities
+
+- Purpose:
+  - Represents a user of the system.
+
+- JPA Mapping:
+  - @Entity, @Table(name = "users").
+  - Fields:
+    - id: primary key (GenerationType.IDENTITY).
+    - name: user’s name.
+    - email: user’s email.
+
+- Lombok:
+  - @Data, @NoArgsConstructor, @AllArgsConstructor for boilerplate getters, setters, and constructors.
+
+
+7.2 Wallet
+
+Package: com.example.sharded_saga_wallet.entities
+
+- Purpose:
+  - Represents a wallet/account associated with a user and holding a monetary balance.
+
+- JPA Mapping:
+  - @Entity, @Table(name = "wallet").
+  - Fields:
+    - id: primary key.
+    - userId: foreign key linking to User.id.
+    - isActive: boolean indicating whether the wallet is active.
+    - balance: BigDecimal representing the current balance, initialized to BigDecimal.ZERO.
+
+- Domain Methods:
+  - boolean hasSufficientBalance(BigDecimal amount)
+    - Returns true if balance >= amount.
+
+  - void debit(BigDecimal amount)
+    - Checks hasSufficientBalance(amount).
+    - Throws IllegalArgumentException if insufficient funds.
+    - Intended to subtract amount from the balance.
+
+  - void credit(BigDecimal amount)
+    - Intended to add amount to the balance.
+
+Note: Correct implementation should assign the result of BigDecimal.subtract/add back to the balance field.
+
+
+7.3 Transaction (Intended)
+
+Package: com.example.sharded_saga_wallet.entities
+
+- Purpose (conceptual; code is incomplete):
+  - Represents a wallet transaction, such as a transfer, deposit, or withdrawal.
+  - Should hold references to involved wallets, amounts, status, type, and the related saga instance.
+
+- Current Code:
+  - Incomplete and has a typo in the @GeneratedValue annotation (GeneratedTpe).
+  - Contains almost no fields.
+
+- Repository Expectations:
+  - TransactionRepository defines:
+    - findByFromWalletId(Long fromWalletId);
+    - findByToWalletId(Long toWalletId);
+    - findByWalletId(Long walletId);
+    - findByStatus(TransactionStatus status);
+    - findBySagaInstanceId(Long sagaInstanceId);
+
+- Intended Fields:
+  - At minimum, should include:
+    - Long id
+    - Long fromWalletId
+    - Long toWalletId
+    - TransactionStatus status
+    - TransactionType type
+    - Long sagaInstanceId
+    - Possibly amount and timestamp fields.
+
+
+7.4 SagaInstance
+
+Package: com.example.sharded_saga_wallet.entities
+
+- Purpose:
+  - Represents a single saga execution instance stored in the database.
+
+- JPA Mapping:
+  - @Entity, @Table(name = "saga_instance").
+  - Fields:
+    - id: primary key.
+    - status: SagaStatus enum, defaulting to SagaStatus.STARTED.
+    - context: String column with columnDefinition = "json" (intended to store serialized SagaContext).
+    - currentStep: String representing the name of the current or last executed step.
+
+- Role in Flow:
+  - When startSaga is called, a new SagaInstance is created and persisted.
+  - As the saga progresses, status and currentStep are updated.
+  - In case of failure, this data is used to coordinate compensation.
+
+
+7.5 entities.SagaStep (Entity)
+
+Package: com.example.sharded_saga_wallet.entities
+
+- Purpose:
+  - Persists per-step execution information for a given SagaInstance.
+
+- JPA Mapping:
+  - @Entity, @Table(name = "saga_step").
+  - Fields:
+    - id: primary key.
+    - sagaInstanceId: foreign key to SagaInstance.id.
+    - status: StepStatus enum value.
+    - errorMessage: String describing any error during the step.
+    - stepData: String that can hold serialized step-specific data or context.
+
+- Role in Flow:
+  - Each time a saga step executes or compensates, the orchestration layer should create or update a SagaStep record.
+  - SagaStepRepository queries allow:
+    - Listing all steps for a saga.
+    - Finding completed or compensated steps when designing compensation flows.
+
+
+8. Enums
+--------
+
+8.1 TransactionStatus
+
+Package: com.example.sharded_saga_wallet.entities.enums
+
+- Values:
+  - PENDING, SUCCESS, FAILED, CANCELLED.
+
+- Usage:
+  - In Transaction (intended) to represent its current state.
+  - In UpdateTransactionStatus to set or restore transaction status.
+  - In TransactionRepository to query transactions by status.
+
+
+8.2 TransactionType
+
+Package: com.example.sharded_saga_wallet.entities.enums
+
+- Values:
+  - TRANSFER, DEPOSIT, WITHDRAWAL.
+
+- Intended Usage:
+  - To classify transactions in the Transaction entity (not yet wired into code).
+
+
+8.3 SagaStatus
+
+Package: com.example.sharded_saga_wallet.entities.enums
+
+- Values:
+  - STARTED, RUNNING, COMPLETED, FAILED, COMPENSATING, COMPENSATED.
+
+- Usage:
+  - On SagaInstance.status to track the saga lifecycle.
+
+
+8.4 StepStatus
+
+Package: com.example.sharded_saga_wallet.entities.enums
+
+- Values:
+  - PENDING, RUNNING, COMPLETED, COMPENSATING, COMPENSATED, SKIPPED.
+
+- Usage:
+  - On entities.SagaStep.status to track each step’s lifecycle.
+  - In SagaStepRepository queries to find completed or compensated steps.
+
+
+9. Repository Layer
+-------------------
+
+9.1 UserRepository
+
+Package: com.example.sharded_saga_wallet.repositories
+
+- Purpose:
+  - JPA repository for User entities.
+
+- Definition:
+  - Extends JpaRepository<User, Long>.
+  - Contains commented-out methods for searching by name (e.g., findByNameContainingIgnoreCase, searchByName).
+
+- Usage:
+  - Used by UserService for saving and fetching users (through inherited JpaRepository methods).
+
+
+9.2 WalletRepository
+
+Package: com.example.sharded_saga_wallet.repositories
+
+- Purpose:
+  - JPA repository for Wallet entities.
+
+- Methods:
+  - List<Wallet> findByUserId(Long userId)
+    - Fetches wallets for a given user.
+
+  - Optional<Wallet> findByIdWithLock(Long id)
+    - Uses @Lock(LockModeType.PESSIMISTIC_WRITE) with a JPQL query to load a wallet row with an exclusive lock.
+
+- Usage:
+  - DebitSourceWalletStep and CreditDestinationWalletStep use findByIdWithLock to perform safe, concurrent updates to balances.
+
+
+9.3 TransactionRepository
+
+Package: com.example.sharded_saga_wallet.repositories
+
+- Purpose:
+  - JPA repository for Transaction entities.
+
+- Methods:
+  - List<Transaction> findByFromWalletId(Long fromWalletId);
+  - List<Transaction> findByToWalletId(Long toWalletId);
+  - List<Transaction> findByWalletId(Long walletId); // via @Query combining fromWalletId and toWalletId
+  - List<Transaction> findByStatus(TransactionStatus status);
+  - List<Transaction> findBySagaInstanceId(Long sagaInstanceId);
+
+- Usage:
+  - Used by UpdateTransactionStatus to load and update a transaction.
+  - Intended to support querying history of transactions per wallet or per saga.
+
+
+9.4 SagaInstanceRepository
+
+Package: com.example.sharded_saga_wallet.repositories
+
+- Purpose:
+  - JPA repository for SagaInstance.
+  - Extends JpaRepository<SagaInstance, Long>.
+
+- Usage:
+  - Intended to be used by a SagaOrchestrator implementation to:
+    - Create new saga instances.
+    - Update status and context.
+    - Retrieve saga instances for monitoring or compensation.
+
+
+9.5 SagaStepRepository
+
+Package: com.example.sharded_saga_wallet.repositories
+
+- Purpose:
+  - JPA repository for entities.SagaStep (per-step saga state).
+
+- Methods:
+  - List<SagaStep> findBySagaInstanceId(Long sagaInstanceId);
+  - List<SagaStep> findCompletedStepsBySagaInstanceId(Long sagaInstanceId);
+  - List<SagaStep> findCompletedOrCompensatedStepsBySagaInstanceId(Long sagaInstanceId);
+
+- Usage:
+  - Intended to let the orchestrator:
+    - Inspect which steps were completed.
+    - Determine which steps should be compensated on failure.
+
+
+10. End-to-End Flow Between Classes
+-----------------------------------
+
+10.1 User Creation and Lookup
+
+Flow: HTTP Client -> UserController -> UserService -> UserRepository -> User
+
+1. User Creation:
+   - Client sends POST /users/create with a JSON body.
+   - UserController.createUser(User) receives the request and forwards the User to UserService.createUser.
+   - UserService.createUser logs the operation, calls userRepository.save(user), logs the assigned ID and derived "database number" for sharding visualization, and returns the created User.
+   - UserController returns the created User in the HTTP response.
+
+2. User Lookup:
+   - Client sends GET /users/{id}.
+   - UserController.getUserById(Long id) calls UserService.getUserById(id).
+   - UserService.getUserById uses userRepository.findById(id) to load the user or throws a "User not found" exception.
+   - The controller returns the user in the HTTP response if found.
+
+
+10.2 Intended Wallet Transfer Saga Flow (Conceptual)
+
+Note: The codebase does not yet include a concrete controller or service that starts wallet transfers, nor a SagaOrchestrator implementation. The following sequence is the intended design based on the available classes.
+
+Conceptual steps:
+
+1. Some upper-level component (e.g., TransferController/TransferService) creates a Transaction with status PENDING and type TRANSFER, linking fromWalletId and toWalletId and the amount.
+2. That component also creates a SagaContext and populates:
+   - "fromWalletId", "toWalletId", "amount", "transactionId", etc.
+3. It calls sagaOrchestrator.startSaga(context):
+   - The orchestrator creates a SagaInstance with status STARTED and the serialized context, then returns sagaInstanceId.
+4. The orchestrator proceeds to execute saga steps in order:
+   - Step 1: DebitSourceWalletStep.execute(context)
+     - Debits the source wallet via WalletRepository.findByIdWithLock and saves the new balance.
+   - Step 2: CreditDestinationWalletStep.execute(context)
+     - Credits the destination wallet (intended; the current implementation has the credit line commented out).
+   - Step 3: UpdateTransactionStatus.execute(context)
+     - Sets the Transaction status to SUCCESS.
+5. If all steps succeed:
+   - The orchestrator calls completeSaga(sagaInstanceId), setting SagaInstance.status to COMPLETED.
+6. If a step fails:
+   - Orchestrator marks the saga as FAILED or COMPENSATING.
+   - It uses SagaStepRepository to find which steps were completed and calls compensate(context) on those steps in reverse order:
+     - UpdateTransactionStatus.compensate(context) restores the original transaction status.
+     - CreditDestinationWalletStep.compensate(context) debits the destination wallet to reverse the credit.
+     - DebitSourceWalletStep.compensate(context) credits the source wallet to restore its original balance.
+   - Finally it marks the saga as COMPENSATED.
+
+
+11. Sequence Diagram (Conceptual)
+---------------------------------
+
+Below is a conceptual sequence diagram for a wallet transfer saga. It assumes the existence of a TransferService (or similar) and a concrete SagaOrchestrator implementation, which fit naturally with the current design but are not yet in the repository.
+
+Notation:
+- "->" indicates a synchronous call.
+- Indentation is used for nested calls.
+
+
+11.1. High-Level Wallet Transfer Saga
+
+Actor: Client (e.g., REST caller)
+
+Client
+  -> TransferController/Service
+    -> TransactionRepository
+      : save new Transaction [PENDING, type=TRANSFER, fromWalletId, toWalletId, amount]
+    <- persisted Transaction (with id = transactionId)
+
+    -> build SagaContext
+      : putData("fromWalletId", fromWalletId)
+      : putData("toWalletId", toWalletId)
+      : putData("amount", amount)
+      : putData("transactionId", transactionId)
+
+    -> SagaOrchestrator.startSaga(context)
+      -> SagaInstanceRepository
+        : save new SagaInstance [status=STARTED, context=json(context), currentStep=null]
+      <- SagaInstance with id = sagaInstanceId
+    <- sagaInstanceId
+
+    -> SagaOrchestrator.executeStep(sagaInstanceId, "DebitSourceWalletStep")
+      -> DebitSourceWalletStep.execute(context)
+        -> WalletRepository.findByIdWithLock(fromWalletId)
+        <- Wallet (sourceWallet)
+        -> sourceWallet.hasSufficientBalance(amount)?
+        -> sourceWallet.debit(amount)
+        -> WalletRepository.save(sourceWallet)
+      <- true
+      -> SagaStepRepository
+        : save SagaStep [sagaInstanceId, status=COMPLETED, stepData, ...]
+      -> SagaInstanceRepository
+        : update SagaInstance [status=RUNNING, currentStep="DebitSourceWalletStep"]
+
+    -> SagaOrchestrator.executeStep(sagaInstanceId, "CreditDestinationWalletStep")
+      -> CreditDestinationWalletStep.execute(context)
+        -> WalletRepository.findByIdWithLock(toWalletId)
+        <- Wallet (destinationWallet)
+        -> destinationWallet.credit(amount)   (intended; currently commented)
+        -> WalletRepository.save(destinationWallet)
+      <- true
+      -> SagaStepRepository
+        : save SagaStep [sagaInstanceId, status=COMPLETED, ...]
+      -> SagaInstanceRepository
+        : update SagaInstance [status=RUNNING, currentStep="CreditDestinationWalletStep"]
+
+    -> SagaOrchestrator.executeStep(sagaInstanceId, "UpdateTransactionStatus")
+      -> UpdateTransactionStatus.execute(context)
+        -> TransactionRepository.findById(transactionId)
+        <- Transaction [status=PENDING]
+        -> transaction.setStatus(SUCCESS)
+        -> TransactionRepository.save(transaction)
+      <- true
+      -> SagaStepRepository
+        : save SagaStep [sagaInstanceId, status=COMPLETED, ...]
+      -> SagaInstanceRepository
+        : update SagaInstance [status=RUNNING, currentStep="UpdateTransactionStatus"]
+
+    -> SagaOrchestrator.completeSaga(sagaInstanceId)
+      -> SagaInstanceRepository
+        : update SagaInstance [status=COMPLETED]
+
+  <- success response to Client (e.g., transfer completed)
+
+
+11.2. Failure and Compensation Scenario (Conceptual)
+
+Consider a failure during CreditDestinationWalletStep.execute (for example, a DB error). The conceptual flow is:
+
+Client
+  -> TransferController/Service
+    -> SagaOrchestrator.startSaga(context)
+    -> SagaOrchestrator.executeStep("DebitSourceWalletStep")
+      : succeeds, source wallet debited
+    -> SagaOrchestrator.executeStep("CreditDestinationWalletStep")
+      : fails with exception
+
+    (Inside SagaOrchestrator upon failure)
+      -> SagaInstanceRepository
+        : update SagaInstance [status=FAILED or COMPENSATING]
+      -> SagaStepRepository.findCompletedStepsBySagaInstanceId(sagaInstanceId)
+        : returns ["DebitSourceWalletStep"]
+      -> run compensations in reverse order:
+        -> DebitSourceWalletStep.compensate(context)
+          -> WalletRepository.findByIdWithLock(fromWalletId)
+          -> sourceWallet.credit(amount)
+          -> WalletRepository.save(sourceWallet)
+        -> Update SagaStep status to COMPENSATED
+      -> SagaInstanceRepository
+        : update SagaInstance [status=COMPENSATED]
+
+  <- error response to Client (e.g., transfer failed; funds restored)
+
+
+12. Summary
+-----------
+
+- ShardedSagaWalletApplication bootstraps the Spring application.
+- UserController and UserService handle basic user operations through UserRepository and the User entity.
+- The saga-related classes (SagaOrchestrator, SagaContext, SagaStep interface, saga steps, SagaInstance, entities.SagaStep, and their repositories) define a pattern for executing distributed, multi-step wallet transfers with compensation on failure.
+- Wallet and Transaction represent core financial entities; WalletRepository and TransactionRepository provide the data access pattern for them.
+- The sequence diagrams above (conceptual) show how these classes are intended to work together during a wallet transfer saga, including both the successful path and a failure/compensation path.
+
